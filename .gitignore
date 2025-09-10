@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual Environment
+venv/
+.env/
+
+# IDE specific
+.vscode/
+.idea/
+
+# Data - Do not commit large datasets
+data/raw/
+data/processed/
+
+# Outputs
+outputs/
+baselines/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/

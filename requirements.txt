@@ -1,8 +1,11 @@
-torch
-torch_geometric
-numpy
-pandas
-scikit-learn
 matplotlib
 networkx
+numpy
+pandas
+pandas-datareader
 pyyaml
+scikit-learn
+torch
+torch_geometric
+tqdm
+yfinance

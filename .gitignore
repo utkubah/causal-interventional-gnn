@@ -11,8 +11,7 @@ venv/
 .idea/
 
 # Data - Do not commit large datasets
-data/raw/
-data/processed/
+data/
 
 # Outputs
 outputs/

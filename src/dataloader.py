@@ -1,93 +1,79 @@
 # src/data_loader.py
-import pandas as pd
+
+import os
 import torch
+import pandas as pd
 from torch_geometric.data import Dataset, Data
-from sklearn.preprocessing import StandardScaler
-from pathlib import Path
 
 class CausalFactorDataset(Dataset):
     """
-    A simple, streamlined PyTorch Geometric Dataset for loading the causal factor graph.
-    
-    This loader reads the processed CSV files and creates a time series of daily
-    graph snapshots. The task is to predict the next day's VOL and LIQ values
-    based on the current day's values for all nodes.
+    One graph per date. Single feature per node.
+    X: [N,1]   Y: [N,1]  (trainer unchanged)
+    We evaluate on a single target node (e.g., 'VOL'); we zero its own feature to avoid leakage.
     """
-    def __init__(self, root_dir: str, train: bool = True, train_split: float = 0.8):
-        self.root_dir = Path(root_dir)
-        self.train = train
-        self.train_split = train_split
-        
-        # --- 1. Load all raw data ---
-        nodes_df = pd.read_csv(self.root_dir / "nodes.csv")
-        edges_df = pd.read_csv(self.root_dir / "edges.csv")
-        features_df = pd.read_csv(self.root_dir / "features.csv", parse_dates=['date'])
+    def __init__(
+        self,
+        root_dir="data/processed",
+        target_node="VOL",
+        feature_col=None,      # if None -> auto-detect the single numeric col
+        drop_self_for_target=True,
+        fillna=0.0,
+        dtype=torch.float
+    ):
+        super().__init__()
+        self.root_dir = root_dir
+        self.target_node = target_node
+        self.drop_self_for_target = drop_self_for_target
+        self.fillna = fillna
+        self.dtype = dtype
 
-        # --- 2. Define the static graph structure ---
-        node_mapping = {node_id: i for i, node_id in enumerate(nodes_df['node_id'])}
-        self.edge_index = torch.tensor([
-            [node_mapping[src], node_mapping[dst]]
-            for src, dst in edges_df[['source', 'target']].values
-        ], dtype=torch.long).t().contiguous()
+        nodes = pd.read_csv(os.path.join(root_dir, "nodes.csv"))
+        edges = pd.read_csv(os.path.join(root_dir, "edges.csv"))
+        feats = pd.read_csv(os.path.join(root_dir, "features.csv"))
 
-        # --- 3. Process the time-series features ---
-        # Pivot from long to wide format (dates x nodes)
-        features_wide = features_df.pivot(index='date', columns='node_id', values='value')
-        # Ensure column order is consistent
-        node_order = nodes_df['node_id'].tolist()
-        features_wide = features_wide[node_order]
-        
-        # --- 4. Create inputs (x) and targets (y) ---
-        # The goal is to predict the *next day's* VOL and LIQ.
-        # So, x is today's data, and y is tomorrow's VOL/LIQ.
-        all_x = torch.tensor(features_wide.values, dtype=torch.float32)
-        all_y_targets = torch.tensor(features_wide[['VOL', 'LIQ']].values, dtype=torch.float32)
-        
-        # x becomes all days except the last one
-        self.x = all_x[:-1]
-        # y becomes all days except the first one
-        self.y = all_y_targets[1:]
-        self.dates = features_wide.index[:-1]
+        node_ids = nodes["node_id"].tolist()
+        self.node_map = {nid: i for i, nid in enumerate(node_ids)}
+        if self.target_node not in self.node_map:
+            raise ValueError(f"target_node '{self.target_node}' not in nodes.csv")
+        self.target_idx = self.node_map[self.target_node]
 
-        # --- 5. Normalize the input features ---
-        # Note: For simplicity, we scale across the whole dataset. For rigorous academic
-        # work, the scaler should be fit ONLY on the training data.
-        scaler = StandardScaler()
-        self.x = torch.from_numpy(scaler.fit_transform(self.x))
+        # edges
+        es = edges["source"].map(self.node_map).to_numpy()
+        ed = edges["target"].map(self.node_map).to_numpy()
+        self.edge_index = torch.tensor([es, ed], dtype=torch.long)
+        self.num_nodes = len(node_ids)
 
-        # --- 6. Split into training and test sets ---
-        split_idx = int(len(self.x) * self.train_split)
-        if self.train:
-            self.x = self.x[:split_idx]
-            self.y = self.y[:split_idx]
-            self.dates = self.dates[:split_idx]
-        else:
-            self.x = self.x_data[split_idx:]
-            self.y = self.y_data[split_idx:]
-            self.dates = self.dates[split_idx:]
-            
-        # Store metadata
-        self.num_nodes = len(nodes_df)
-        self.node_mapping = node_mapping
-        
-        super().__init__(str(root_dir), None, None)
+        # sort features by date/node
+        feats["date"] = pd.to_datetime(feats["date"])
+        feats = feats.sort_values(["date", "node_id"])
 
-    def len(self):
-        """Returns the number of days in the dataset."""
-        return len(self.x_data)
+        # detect the single numeric feature column if not provided
+        if feature_col is None:
+            cand = [c for c in feats.columns if c not in {"date","node_id"} and pd.api.types.is_numeric_dtype(feats[c])]
+            if len(cand) != 1:
+                raise ValueError(f"expected exactly 1 numeric feature col; found {cand}")
+            feature_col = cand[0]
+        self.feature_col = feature_col
 
-    def get(self, idx: int):
-        """
-        Returns a single graph snapshot for a specific day.
-        
-        The features for each node (x) is its single value for that day.
-        The target (y) is the [VOL, LIQ] tuple for the *next* day.
-        """
-        # Node features for the day `idx`. Shape must be [num_nodes, num_features].
-        # Since each node has 1 feature (its value), we add a dimension.
-        x_snapshot = self.x_data[idx].unsqueeze(1)
-        
-        # Target values for the day `idx` (which corresponds to day `idx+1`'s values)
-        y_snapshot = self.y_data[idx]
-        
-        return Data(x=x_snapshot, edge_index=self.edge_index, y=y_snapshot, date=self.dates[idx])
+        # X: [T, N, 1]
+        p = feats.pivot(index="date", columns="node_id", values=self.feature_col)
+        p = p.reindex(columns=node_ids).sort_index().fillna(self.fillna)
+        X = torch.tensor(p.values, dtype=self.dtype).unsqueeze(-1)  # [T,N,1]
+
+        # Y = same-day full vector (trainer expects [N,1])
+        Y = X.clone()
+
+        self.dates = p.index
+        self.X = X
+        self.Y = Y
+        self.node_ids = node_ids
+
+    def __len__(self):
+        return self.X.size(0)
+
+    def __getitem__(self, idx):
+        x = self.X[idx].clone()   # [N,1]
+        if self.drop_self_for_target:
+            x[self.target_idx] = 0.0
+        y = self.Y[idx]           # [N,1]
+        return Data(x=x, edge_index=self.edge_index, y=y, num_nodes=self.num_nodes)

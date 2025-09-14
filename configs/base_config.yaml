@@ -3,13 +3,6 @@ experiment_name: "GNN_NCM_Base_Run"
 seed: 42
 device: "cuda" # 'cuda' or 'cpu'
 
-# --- Data Settings ---
-# Path to a directory containing edges.csv, node_features_temporal.csv, etc.
-data_dir: "data/financial_data"
-# Define which columns in your feature CSV are the actual features
-feature_cols: ['feature_1', 'feature_2', 'volatility', 'lag_return_1d']
-# Define the target variable column
-target_col: 'return_1d_future'
 
 # --- Model Hyperparameters ---
 model:
@@ -22,7 +15,7 @@ model:
 # --- Training Settings ---
 training:
   type: "HybridCausalTrainer"
-  epochs: 200
+  epochs: 50
   lr: 0.005
   gamma: 0.5 # Weight for the causal regularizer
 

@@ -1,170 +1,208 @@
-import torch
-import torch.optim as optim
-import torch.nn as nn
-import torch.nn.functional as F
-from src.models import TeacherGNN
+import torch, torch.nn as nn, torch.optim as optim
 
-class HybridCausalTrainer:
-    def __init__(self, epochs=50, lr=0.01, gamma=0.5):
-        self.epochs = epochs; self.lr = lr; self.gamma = gamma; self.loss_fn = nn.MSELoss()
+class CausalTwoPartTrainer:
+    def __init__(self,
+                 epochs_obs=30,
+                 epochs_do=150,
+                 lr=5e-3,
+                 w_obs=0.2,
+                 w_do=1.0,
+                 weight_decay=1e-4,
+                 clip=1.0,
+                 # knobs for your causal do(parent) construction
+                 neutral='zeros',     # 'zeros' or 'self+delta'
+                 delta=0.0):          # scalar or 1D tensor of size F (used when neutral == 'self+delta')
+        self.epochs_obs = int(epochs_obs)
+        self.epochs_do  = int(epochs_do)
+        self.lr  = float(lr)
+        self.w_obs = float(w_obs)
+        self.w_do  = float(w_do)
+        self.wd  = float(weight_decay)
+        self.clip = float(clip)
 
-    def _is_loader(self, obj):
-        # treat as loader if it's iterable and not a single Data object
-        return hasattr(obj, "__iter__") and not hasattr(obj, "x")
+        self.neutral = str(neutral)
+        # delta can be float or tensor; we’ll broadcast to feature size later
+        self.delta = delta
 
-    def train(self, model_to_train, data_or_loader):
-        if self._is_loader(data_or_loader):
-            return self._train_over_loader(model_to_train, data_or_loader)
-        else:
-            return self._train_on_graph(model_to_train, data_or_loader)
+        self.loss = nn.MSELoss()
+        self.history = []
 
-    def _train_on_graph(self, model_to_train, g):
-        device = g.x.device
-        model_to_train = model_to_train.to(device)
-        opt = optim.Adam(model_to_train.parameters(), lr=self.lr)
+    
+    # expects ONE DataLoader of observational snapshots (each g has: x, edge_index, y)
+    def train(self, model, loader, val_loader=None, val_node_idx=None):
+        dev = next(model.parameters()).device
+        model = model.to(dev)
 
-        in_dim = g.x.size(-1)
-        teacher = TeacherGNN(in_dim, 16, 8).to(device)
-        opt_t = optim.Adam(teacher.parameters(), lr=0.01)
-
-        print("--- Pre-training Teacher Model ---")
-        for _ in range(100):
-            opt_t.zero_grad()
-            out = teacher(g.x, g.edge_index)
-            loss_t = F.mse_loss(out, g.y)
-            loss_t.backward(); opt_t.step()
-        teacher.eval(); print("Teacher model trained.")
-
-        print("\n--- Starting Hybrid Causal Training ---")
-        for epoch in range(self.epochs):
-            model_to_train.train(); opt.zero_grad()
-
-            preds = model_to_train(g.x, g.edge_index)
-            loss_obs = self.loss_fn(preds, g.y)
-
-            with torch.no_grad():
-                tpreds = teacher(g.x, g.edge_index)
-
-            loss_causal = 0.0; count = 0
-            src = g.edge_index[0]; dst = g.edge_index[1]
-            for v in range(g.num_nodes):
-                parents = src[dst == v]
-                if parents.numel() == 0: continue
-                count += 1
-                ivals = []
-                for p in parents:
-                    p = p.item()
-                    after = model_to_train.do_intervention(
-                        g.x, g.edge_index,
-                        intervened_nodes=torch.tensor([p], device=device),
-                        new_feature_values=g.x.new_zeros(1, g.x.size(-1))
-                    )
-                    ivals.append(after[v])
-                ivals = torch.stack(ivals, dim=0).mean(dim=0)
-                loss_causal = loss_causal + self.loss_fn(ivals, tpreds[v])
-
-            if count > 0: loss_causal = loss_causal / count
-            total = loss_obs + self.gamma * loss_causal
-            total.backward(); opt.step()
-
-            if (epoch + 1) % 20 == 0:
-                print(f"Epoch {epoch+1:03d} | Total {total.item():.4f} (Obs {loss_obs.item():.4f}, Causal {loss_causal.item():.4f})")
-        print("Training finished.")
-
-    def _train_over_loader(self, model_to_train, loader):
-        # get a fresh iterator every time
-        it = iter(loader)
-        first = next(it)
-        device = first.x.device
-        model_to_train = model_to_train.to(device)
-        opt = optim.Adam(model_to_train.parameters(), lr=self.lr)
-
-        in_dim = first.x.size(-1)
-        teacher = TeacherGNN(in_dim, 32, 16).to(device)
-        opt_t = optim.Adam(teacher.parameters(), lr=0.01)
-
-        print("--- Pre-training Teacher Model (on first batch) ---")
-        for _ in range(200):
-            opt_t.zero_grad()
-            out = teacher(first.x, first.edge_index)
-            loss_t = F.mse_loss(out, first.y)
-            loss_t.backward(); opt_t.step()
-        teacher.eval(); print("Teacher model trained.")
-
-        print("\n--- Starting Hybrid Causal Training over dataset ---")
-        for epoch in range(self.epochs):
+        # -------- Phase 1: observational warm-up (obs only) --------
+        opt = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.wd)
+        for ep in range(1, self.epochs_obs + 1):
+            model.train()
+            obs_sum, n_obs = 0.0, 0
             for g in loader:
-                g = g.to(device)
-                model_to_train.train(); opt.zero_grad()
+                g = g.to(dev)
+                pred = model(g.x, g.edge_index)
+                l_obs = self.loss(pred, g.y)
 
-                preds = model_to_train(g.x, g.edge_index)
-                loss_obs = self.loss_fn(preds, g.y)
+                opt.zero_grad()
+                l_obs.backward()
+                if self.clip: torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip)
+                opt.step()
 
-                with torch.no_grad():
-                    tpreds = teacher(g.x, g.edge_index)
+                obs_sum += float(l_obs.detach()); n_obs += 1
 
-                loss_causal = 0.0; count = 0
-                src = g.edge_index[0]; dst = g.edge_index[1]
-                for v in range(g.num_nodes):
-                    parents = src[dst == v]
-                    if parents.numel() == 0: continue
-                    count += 1
-                    ivals = []
-                    for p in parents:
-                        p = p.item()
-                        after = model_to_train.do_intervention(
-                            g.x, g.edge_index,
-                            intervened_nodes=torch.tensor([p], device=device),
-                            new_feature_values=g.x.new_zeros(1, g.x.size(-1))
-                        )
-                        ivals.append(after[v])
-                    ivals = torch.stack(ivals, dim=0).mean(dim=0)
-                    loss_causal = loss_causal + self.loss_fn(ivals, tpreds[v])
+            m_obs = obs_sum / n_obs
+            m_val= self.evaluate_obs_mse(model, val_loader, node_idx=val_node_idx)
 
-                if count > 0: loss_causal = loss_causal / count
-                total = loss_obs + self.gamma * loss_causal
-                total.backward(); opt.step()
+            self.history.append({
+                "epoch": ep, "phase": "obs",
+                "loss_obs": m_obs, "loss_do": None, "loss_total": m_obs,
+                "val_obs": m_val
+            })
+            if ep % 10 == 0:
+                msg = f"[obs {ep:03d}] obs={m_obs:.6f}"
+                if m_val is not None: msg += f" | val_obs={m_val:.6f}"
+                print(msg)
 
-            if (epoch + 1) % 20 == 0:
-                print(f"[ep {epoch+1:03d}] total={total.item():.4f} (obs={loss_obs.item():.4f}, causal={loss_causal.item():.4f})")
-        print("Training finished over dataset.")
+
+        # -------- Phase 2: obs + teacher-free causal (one combined step per batch) --------
+        # reset optimizer to avoid stale momentum from Phase 1
+        opt = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.wd)
+
+        
+        for ep in range(1, self.epochs_do + 1):
+            model.train()
+            obs_sum, do_sum, n_obs, n_do = 0.0, 0.0, 0, 0
+
+            for g in loader:
+                g = g.to(dev)
+                x, edge_index, y = g.x, g.edge_index, g.y
+
+                # observational term
+                p_obs = model(x, edge_index)
+                l_obs = self.loss(p_obs, y)
+                obs_sum += float(l_obs.detach()); n_obs += 1
+
+                # teacher-free causal term: do(parent) one at a time, aggregate to each child
+                l_cau = self._causal_loss_do_parent_average(model, g, p_obs)
+                do_sum += float(l_cau.detach()); n_do += 1
+
+                # combine and step once
+                total = (self.w_obs * l_obs) + (self.w_do * l_cau)
+                opt.zero_grad()
+                total.backward()
+                if self.clip: torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip)
+                opt.step()
+
+            m_obs = obs_sum / max(n_obs, 1) if n_obs else 0.0
+            m_do  = do_sum  / max(n_do,  1) if n_do  else 0.0
+            total_epoch = (self.w_obs * m_obs) + (self.w_do * m_do if n_do else 0.0)
+
+            m_val= self.evaluate_obs_mse(model, val_loader, node_idx=val_node_idx)
+
+            ep_abs = self.epochs_obs + ep
+            self.history.append({
+                "epoch": ep_abs, "phase": "do",
+                "loss_obs": m_obs, "loss_do": m_do, "loss_total": total_epoch,
+                "val_obs": m_val
+            })
+            if ep % 10 == 0:
+                msg = f"[do  {ep:03d}] total={total_epoch:.6f} (obs={m_obs:.6f}, do={m_do:.6f})"
+                if m_val is not None: msg += f" | val_obs={m_val:.6f}"
+                print(msg)
+
+
+        return model
+
+    def _causal_loss_do_parent_average(self, model, g, p_obs):
+        """
+        Implements your causal loss verbatim:
+          - For each UNIQUE parent node p (from edges src->dst), compute prediction under do(p)
+            where features of p are set to a neutral row ('zeros' or 'self+delta').
+          - For each child v, average the do(p)[v] over all parents p of v to form a target.
+          - Compare that target to TRUE y[v] (MSE), average over nodes that have parents.
+
+        No teacher labels (y_do) and no masks are used.
+        """
+        dev = p_obs.device
+        x, edge_index, y = g.x, g.edge_index, g.y
+        N, F = x.size(0), x.size(1)
+
+        # edges assumed in PyG convention: [2, E] with src = edge_index[0], dst = edge_index[1]
+        src, dst = edge_index[0], edge_index[1]
+        if src.numel() == 0:
+            # no edges -> no parents -> causal term 0 (preserve grad graph/dtype)
+            return 0.0 * p_obs.sum()
+
+        unique_parents = torch.unique(src)
+
+        # prepare delta row if needed
+        if isinstance(self.delta, torch.Tensor):
+            delta_row = self.delta.to(device=dev, dtype=x.dtype)
+        else:
+            delta_row = torch.full((F,), float(self.delta), device=dev, dtype=x.dtype)
+
+        # compute do(parent) predictions once per parent
+        p1_map = {}
+        for p in unique_parents.tolist():
+            p = int(p)
+            if self.neutral == 'zeros':
+                new_row = torch.zeros(F, device=dev, dtype=x.dtype)
+            else:  # 'self+delta'
+                new_row = x[p] + delta_row
+
+            if hasattr(model, "do_intervention") and callable(getattr(model, "do_intervention")):
+                p1 = model.do_intervention(
+                    x, edge_index,
+                    intervened_nodes=torch.tensor([p], dtype=torch.long, device=dev),
+                    new_feature_values=new_row.unsqueeze(0)
+                )  # [N, ...]
+            else:
+                # fallback: override node p's features and run a forward pass
+                x_do = x.clone()
+                x_do[p] = new_row
+                p1 = model(x_do, edge_index)  # [N, ...]
+            p1_map[p] = p1
+
+        # aggregate targets per child and compare to TRUE y[v]
+        loss_causal = 0.0
+        count = 0
+        for v in range(N):
+            parents_v = src[dst == v]
+            if parents_v.numel() == 0:
+                continue
+            vals = []
+            for p in parents_v.tolist():
+                if p in p1_map:
+                    vals.append(p1_map[p][v])  # prediction at node v under do(p)
+            if not vals:
+                continue
+            target_v = torch.stack(vals, dim=0).mean(dim=0)  # averaged target for node v
+            loss_causal = loss_causal + self.loss(target_v, y[v])
+            count += 1
+
+        return (loss_causal / count) if count > 0 else (0.0 * p_obs.sum())
 
     @torch.no_grad()
-    def evaluate(self, model, data_or_loader, target_idx=None):
+    def evaluate_obs_mse(self, model, loader, node_idx=None):
         model.eval()
-        device = next(model.parameters()).device
+        dev = next(model.parameters()).device
+        tot, n = 0.0, 0
+        for g in loader:
+            g = g.to(dev)
+            p = model(g.x, g.edge_index)   # [N], [N,1], or [N,C]
+            y = g.y                        # [N], [N,1], or [N,C]
 
-        # DataLoader path
-        if hasattr(data_or_loader, "__iter__") and not hasattr(data_or_loader, "x"):
-            total, n = 0.0, 0
-            for g in data_or_loader:
-                g = g.to(device)  # <<< move batch to model device
-                preds = model(g.x, g.edge_index)  # [num_nodes, 1] usually
+            # --- safe, few-line fix for single-node eval ---
+            if node_idx is not None and p.shape[0] == y.shape[0]:
+                idx = node_idx if torch.is_tensor(node_idx) else torch.tensor([int(node_idx)], device=dev)
+                idx = idx.to(torch.long).view(-1)
+                p = p.index_select(0, idx)
+                y = y.index_select(0, idx)
+            # align [N,1] ↔ [N]
+            if p.dim()==2 and p.size(-1)==1: p = p.squeeze(-1)
+            if y.dim()==2 and y.size(-1)==1: y = y.squeeze(-1)
+            # -----------------------------------------------
 
-                # choose target
-                if target_idx is None:
-                    y = g.y
-                    p = preds
-                else:
-                    # if g.y is scalar for the chosen target
-                    if g.y.ndim == 1 or (g.y.ndim == 2 and g.y.shape[-1] == 1):
-                        y = g.y.squeeze()
-                        p = preds[target_idx].squeeze()
-                    else:
-                        # if g.y has per-node targets
-                        y = g.y[target_idx]
-                        p = preds[target_idx]
+            tot += self.loss(p, y).item(); n += 1
+        return tot / max(n, 1)
 
-                total += self.loss_fn(p, y).item()
-                n += 1
-            return total / max(n, 1)
-
-        # Single-graph path
-        g = data_or_loader.to(device)
-        preds = model(g.x, g.edge_index)
-        if target_idx is None:
-            return self.loss_fn(preds, g.y).item()
-        else:
-            if g.y.ndim == 1 or (g.y.ndim == 2 and g.y.shape[-1] == 1):
-                return self.loss_fn(preds[target_idx].squeeze(), g.y.squeeze()).item()
-            return self.loss_fn(preds[target_idx], g.y[target_idx]).item()

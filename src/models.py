@@ -125,21 +125,6 @@ class GNN_NCM(nn.Module):
         h2 = F.relu(h2)
         return self.out(h2)
 
-class TeacherGNN(nn.Module):
-    """A small teacher network used for self-consistency regularization."""
-    def __init__(self, in_dim: int, hidden_dim: int = 16, out_dim: int = 8):
-        super().__init__()
-        self.conv1 = GCNConv(in_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, out_dim)
-        self.out = nn.Linear(out_dim, 1)
-
-    def forward(self, x, edge_index):
-        h = F.relu(self.conv1(x, edge_index))
-        h = F.relu(self.conv2(h, edge_index))
-        return self.out(h)
-
-
-
 class BaselineGCN(nn.Module):
     """A simple, shared-parameter GCN for comparisons."""
     def __init__(self, num_features: int, hidden_dim: int = 32, out_dim: int = 16):

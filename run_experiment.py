@@ -1,4 +1,3 @@
-# run_experiment.py
 import argparse, yaml, torch, numpy as np, random
 from pathlib import Path
 from torch_geometric.loader import DataLoader
@@ -6,7 +5,7 @@ from torch.utils.data import Subset
 
 from src.dataloader import CausalFactorDataset
 from src.models import GNN_NCM
-from src.trainer import CausalTwoPartTrainer  # your trainer name
+from src.trainer import CausalTwoPartTrainer 
 
 def set_seed(s=42):
     random.seed(s); np.random.seed(s); torch.manual_seed(s)
@@ -61,8 +60,20 @@ def main(cfg_path):
     # train
     trainer.train(model, train_loader, val_loader=val_loader)
 
-    # simple print at the end
-    print("done.")
+        # save minimal artifacts
+    outdir = Path(cfg.get("output", {}).get("output_dir", "outputs")) / cfg.get("experiment_name", "exp")
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    import pandas as pd, json
+    pd.DataFrame(trainer.history).to_csv(outdir / "history.csv", index=False)
+    torch.save(model.state_dict(), outdir / "model.pt")
+
+    final_val = [h["val_obs"] for h in trainer.history if h.get("val_obs") is not None][-1]
+    with open(outdir / "final_metrics.json", "w") as f:
+        json.dump({"val_obs_mse_VOL": float(final_val)}, f)
+    print("Saved:", outdir)
+
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()

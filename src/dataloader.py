@@ -7,9 +7,10 @@ from torch_geometric.data import Dataset, Data
 
 class CausalFactorDataset(Dataset):
     """
-    One graph per date. Single feature per node.
-    X: [N,1]   Y: [N,1]  (trainer unchanged)
-    We evaluate on a single target node (e.g., 'VOL'); we zero its own feature to avoid leakage.
+    We train on all nodes’ Y as same-day reconstruction; evaluation focuses on VOL.
+    - X: node features per graph/day
+    - Y: same-day reconstruction target = X.clone()
+    - target_idx: index of VOL (used by eval in trainer/run_experiment)
     """
     def __init__(
         self,

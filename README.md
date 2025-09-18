@@ -57,7 +57,7 @@ All experiments are run via the `run_experiment.py` script and are configured by
 2.  **Configure your experiment:** Create or edit a `.yaml` file in `configs/` to specify the data paths, model hyperparameters, and training settings.
 3.  **Run the experiment:**
     ```bash
-    python run_experiment.py --config configs/base_config.yaml
+    python run_experiment.py --config configs/best_config.yaml
     ```
     Results and model checkpoints will be saved to the `outputs/` directory.
 

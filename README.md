@@ -36,7 +36,7 @@ causal-interventional-gnn/
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/causal-interventional-gnn.git
+    git clone https://github.com/utkubah/causal-interventional-gnn.git
     cd causal-interventional-gnn
     ```
 2.  **Create a virtual environment (recommended):**

@@ -9,7 +9,6 @@ class CausalTwoPartTrainer:
                  w_do=1.0,
                  weight_decay=1e-4,
                  clip=1.0,
-                 # knobs for your causal do(parent) construction
                  neutral='zeros',     # 'zeros' or 'self+delta'
                  delta=0.0):          # scalar or 1D tensor of size F (used when neutral == 'self+delta')
         self.epochs_obs = int(epochs_obs)
@@ -19,21 +18,17 @@ class CausalTwoPartTrainer:
         self.w_do  = float(w_do)
         self.wd  = float(weight_decay)
         self.clip = float(clip)
-
         self.neutral = str(neutral)
-        # delta can be float or tensor; we’ll broadcast to feature size later
         self.delta = delta
-
         self.loss = nn.MSELoss()
         self.history = []
 
-    
-    # expects ONE DataLoader of observational snapshots (each g has: x, edge_index, y)
-    def train(self, model, loader, val_loader=None, val_node_idx=None):
+
+    def train(self, model, loader, val_loader=None):
         dev = next(model.parameters()).device
         model = model.to(dev)
 
-        # -------- Phase 1: observational warm-up (obs only) --------
+        # Phase 1: observational warm-up (obs only)
         opt = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.wd)
         for ep in range(1, self.epochs_obs + 1):
             model.train()
@@ -51,7 +46,7 @@ class CausalTwoPartTrainer:
                 obs_sum += float(l_obs.detach()); n_obs += 1
 
             m_obs = obs_sum / n_obs
-            m_val= self.evaluate_obs_mse(model, val_loader, node_idx=val_node_idx)
+            m_val= self.evaluate_obs_mse(model, val_loader)
 
             self.history.append({
                 "epoch": ep, "phase": "obs",
@@ -64,7 +59,7 @@ class CausalTwoPartTrainer:
                 print(msg)
 
 
-        # -------- Phase 2: obs + teacher-free causal (one combined step per batch) --------
+        # Phase 2: obs + teacher-free causal (one combined step per batch)
         # reset optimizer to avoid stale momentum from Phase 1
         opt = optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.wd)
 
@@ -82,7 +77,7 @@ class CausalTwoPartTrainer:
                 l_obs = self.loss(p_obs, y)
                 obs_sum += float(l_obs.detach()); n_obs += 1
 
-                # teacher-free causal term: do(parent) one at a time, aggregate to each child
+                # causal term: do(parent) one at a time, aggregate to each child
                 l_cau = self._causal_loss_do_parent_average(model, g, p_obs)
                 do_sum += float(l_cau.detach()); n_do += 1
 
@@ -97,7 +92,7 @@ class CausalTwoPartTrainer:
             m_do  = do_sum  / max(n_do,  1) if n_do  else 0.0
             total_epoch = (self.w_obs * m_obs) + (self.w_do * m_do if n_do else 0.0)
 
-            m_val= self.evaluate_obs_mse(model, val_loader, node_idx=val_node_idx)
+            m_val= self.evaluate_obs_mse(model, val_loader)
 
             ep_abs = self.epochs_obs + ep
             self.history.append({
@@ -127,15 +122,14 @@ class CausalTwoPartTrainer:
         x, edge_index, y = g.x, g.edge_index, g.y
         N, F = x.size(0), x.size(1)
 
-        # edges assumed in PyG convention: [2, E] with src = edge_index[0], dst = edge_index[1]
         src, dst = edge_index[0], edge_index[1]
         if src.numel() == 0:
-            # no edges -> no parents -> causal term 0 (preserve grad graph/dtype)
+            # no edges -> no parents -> causal term 0 
             return 0.0 * p_obs.sum()
 
         unique_parents = torch.unique(src)
 
-        # prepare delta row if needed
+
         if isinstance(self.delta, torch.Tensor):
             delta_row = self.delta.to(device=dev, dtype=x.dtype)
         else:
@@ -155,12 +149,11 @@ class CausalTwoPartTrainer:
                     x, edge_index,
                     intervened_nodes=torch.tensor([p], dtype=torch.long, device=dev),
                     new_feature_values=new_row.unsqueeze(0)
-                )  # [N, ...]
+                )  
             else:
-                # fallback: override node p's features and run a forward pass
                 x_do = x.clone()
                 x_do[p] = new_row
-                p1 = model(x_do, edge_index)  # [N, ...]
+                p1 = model(x_do, edge_index)  
             p1_map[p] = p1
 
         # aggregate targets per child and compare to TRUE y[v]
@@ -183,26 +176,16 @@ class CausalTwoPartTrainer:
         return (loss_causal / count) if count > 0 else (0.0 * p_obs.sum())
 
     @torch.no_grad()
-    def evaluate_obs_mse(self, model, loader, node_idx=None):
+    def evaluate_obs_mse(self, model, loader):
         model.eval()
         dev = next(model.parameters()).device
         tot, n = 0.0, 0
         for g in loader:
             g = g.to(dev)
-            p = model(g.x, g.edge_index)   # [N], [N,1], or [N,C]
-            y = g.y                        # [N], [N,1], or [N,C]
-
-            # --- safe, few-line fix for single-node eval ---
-            if node_idx is not None and p.shape[0] == y.shape[0]:
-                idx = node_idx if torch.is_tensor(node_idx) else torch.tensor([int(node_idx)], device=dev)
-                idx = idx.to(torch.long).view(-1)
-                p = p.index_select(0, idx)
-                y = y.index_select(0, idx)
-            # align [N,1] ↔ [N]
+            p = model(g.x, g.edge_index)  
+            y = g.y                       
             if p.dim()==2 and p.size(-1)==1: p = p.squeeze(-1)
             if y.dim()==2 and y.size(-1)==1: y = y.squeeze(-1)
-            # -----------------------------------------------
-
             tot += self.loss(p, y).item(); n += 1
         return tot / max(n, 1)
 

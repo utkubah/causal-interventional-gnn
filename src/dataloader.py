@@ -16,7 +16,7 @@ class CausalFactorDataset(Dataset):
         self,
         root_dir="data/processed",
         target_node="VOL",
-        feature_col=None,      # if None -> auto-detect the single numeric col
+        feature_col=None,      
         drop_self_for_target=True,
         fillna=0.0,
         dtype=torch.float

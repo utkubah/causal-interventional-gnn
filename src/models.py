@@ -20,7 +20,6 @@ class EdgeWiseGNNLayer(MessagePassing):
 
         if self.mode == 'per_edge':
             # Create a list of MLPs, one for each edge. This is our f_ij.
-            # nn.ModuleList is crucial for PyTorch to recognize these as submodules.
             self.edge_mlps = nn.ModuleList([
                 nn.Sequential(nn.Linear(in_dim, hidden_dim),nn.ReLU(),nn.Linear(hidden_dim, out_dim)) for i in range(num_edges)
             ])
@@ -48,16 +47,12 @@ class EdgeWiseGNNLayer(MessagePassing):
             original_edge_ids (Tensor, optional): The original IDs of the edges in edge_index.
                                                    If None, assumes a full graph pass.
         """
-        # If the original edge IDs aren't provided, we are doing a standard observational pass.
+
         if original_edge_ids is None:
             original_edge_ids = torch.arange(self.num_edges, device=x.device)
-        
-        # The propagate method will call message() and aggregate(), and its output
-        # is the aggregated messages for each node.
+
         aggr_out = self.propagate(edge_index, x=x, original_edge_ids=original_edge_ids)
         
-        # The update() method is then called to combine the aggregated messages with
-        # the original node features to produce the final node embeddings.
         return self.update(aggr_out, x)
 
 
@@ -70,9 +65,6 @@ class EdgeWiseGNNLayer(MessagePassing):
             edge_ids (Tensor): A tensor containing the index of each edge, which we use
                                to select the appropriate MLP.
         """
-        # This is a bit complex, but powerful. We can't apply all MLPs at once.
-        # We create a placeholder for the output messages.
-
         output_messages = torch.zeros(x_j.size(0), self.out_dim, device=x_j.device)
         if self.mode == 'per_edge':
             for i in range(self.num_edges):

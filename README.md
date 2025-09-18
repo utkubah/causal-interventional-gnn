@@ -1,20 +1,26 @@
 # Causal Interventional GNN
 
-This repository contains the official implementation for the Bachelor's Thesis by Utku Bahçıvanoğlu, Bocconi University. The project introduces a high-fidelity, causally-informed Graph Neural Network (GNN) and demonstrates its superior robustness in the domain of financial factor investing.
+This repository contains the official implementation for the Bachelor's Thesis by **Utku Bahçıvanoğlu** (Università Bocconi). The project introduces a **high-fidelity, causally-informed Graph Neural Network (GNN)** and evaluates it on both a **controlled synthetic SCM** and a **finance panel** built around a hypothesized microstructure DAG.
 
 ## The Core Contribution
 
-This thesis addresses a fundamental conflict between the theory of Structural Causal Models (SCMs) and the practice of GNNs:
--   **SCMs** assume that each cause-effect relationship is a distinct, modular mechanism.
--   **Standard GNNs** violate this by sharing the same message-passing parameters across all edges, learning an average, correlational effect.
+This thesis addresses a fundamental conflict between **Structural Causal Models (SCMs)** and **standard GNN practice**:
 
-This work resolves this gap by introducing two key contributions:
-1.  **A High-Fidelity GNN Architecture:** The `EdgeWiseGNNLayer` is a novel GNN layer that instantiates a unique, learnable neural network for each edge in the causal graph. This directly implements the SCM principle of modular mechanisms, creating a more faithful causal analogue.
-2.  **A Robust Causal Training Algorithm:** The `HybridCausalTrainer` learns interventional distributions from purely observational data. It combines a standard predictive loss with a novel **causal regularizer**. This regularizer forces the model's internal mechanisms to be self-consistent, pushing it to learn true causal dependencies instead of spurious correlations.
+- **SCMs** assume that each cause–effect relationship is a **distinct, modular mechanism** that can be surgically manipulated via the do-operator.
+- **Typical GNNs** share a single message function across edges, collapsing distinct mechanisms into an **average correlational operator**.
 
-The central hypothesis is that this causally-rigorous design leads to a model that is more robust and generalizes better to out-of-distribution events like real-world market shocks.
+This work closes that gap with two main ideas:
+
+1. **Edge-wise Causal GNN Layer.**  
+   `EdgeWiseGNNLayer` instantiates a **separate neural mechanism per directed edge**. This preserves **SCM modularity** and enables **graph surgery** (delete inbound edges + clamp assignments) to simulate interventions coherently.
+
+2. **Two Part Causal Training.**  
+   A two-stage trainer combines **observational fit** (standard predictive loss) with a **CXGNN-inspired causal regularizer** that encourages **self-consistency under do-operations**. On the synthetic dataset we additionally train with **true interventional samples** to benchmark **ATE fidelity**.
+
+**Hypothesis.** Explicit SCM semantics (directionality, modularity, graph surgery) yield models that are not only accurate on factual data but also **behave correctly under interventions** and are **more robust** to shift.
 
 ## Project Structure
+
 
 ```
 causal-interventional-gnn/
